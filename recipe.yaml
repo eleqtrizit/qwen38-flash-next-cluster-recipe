@@ -12,8 +12,8 @@ server:
   # model: myllmbox/Qwen3.8-Flash-Next-hibrid48-uncensored   # same, abliterated body, NO guardrails. GATED on Hugging Face:
                                                 # accept its agreement, then hf auth login or export HF_TOKEN
                                                 # (switching model? swap the kv-cache-memory line under vllm: too)
-  port: 8000                                    # OpenAI API on the head box
-  host: 127.0.0.1                               # 0.0.0.0 to expose it on the LAN
+  port: 8050                                    # OpenAI API on the head box (LAN-exposed)
+  host: 0.0.0.0                                 # bound on all interfaces (host networking) — expose the API on the LAN
   master_port: 25000                            # torch.distributed rendezvous, on the interconnect
   ib_links: 2                                   # RDMA devices per box: 2 = both halves of the ConnectX-7 (needs an IPv4 on the
                                                 # second interface, else run.sh stays on 1)
@@ -23,7 +23,13 @@ server:
 
 env:
   MBX_FUSED_DRAFT: "1"
-  MBX_PLE_REPLICATE: "0"                        # half the n-gram table per box; "1" = full table (~14G more per box)
+  MBX_PLE_REPLICATE: "0"                        # half the n-gram table per box; "1" = full table (~14G more per box).
+                                                # NOTE: flipping requires clearing ./cache on BOTH boxes (vllm-cache /
+                                                # flashinfer-workspace / ple-mmap, root-owned — use a container:
+                                                # docker run --rm --entrypoint sh -v $PWD/cache:/c
+                                                # myllmbox/qwen38-flash-next-cluster-vllm:v5.2 -c 'rm -rf /c/vllm-cache
+                                                # /c/flashinfer-workspace /c/ple-mmap'), else boot dies with a fake-kernel
+                                                # shape mismatch (expected size 160000768==320001536).
   PYTHONUNBUFFERED: "1"
   TORCH_NCCL_ASYNC_ERROR_HANDLING: "1"
   TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC: "180"       # die in 3 min on a stuck collective
@@ -47,14 +53,14 @@ env:
   NCCL_MAX_NCHANNELS: "4"
 
 vllm:
-  served-model-name: Qwen/Qwen3.8-Flash-Next
+  served-model-name: model
   engram-config: '{"cpu_offload": false}'       # n-gram table on the GPU
   gdn-prefill-backend: flashinfer
   moe-backend: marlin                           # hibrid48; run.sh drops it for INT4
   pipeline-parallel-size: 1
   distributed-executor-backend: mp
   gpu-memory-utilization: 0.70                  # the KV pool is sized by kv-cache-memory below, not by this
-  kv-cache-memory: "29000000000"                # INT4-AutoRound: 29G per box = 1,829,182 KV tokens
+  kv-cache-memory: "28000000000"                # INT4-AutoRound: 28G per box (any freed memory is spare)
   # kv-cache-memory: "33000000000"              # hibrid48 / hibrid48-uncensored: 33G per box = 2,079,675 KV tokens
   compilation-config: '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,3,4,5,6,7,8,10,12,14,15,16,18,20,21,24,25,28,30,32,35,36,40,42,44,45,48,49,50,52,54,55,56,60,63,64,65,66,70,72,75,77,78,80,84,88,90,91,96,98,100,104,105,112,120,128,140,144,160,168,192,196,200,224,240,256,280,288,320,336,384,392,448,512],"compile_ranges_endpoints":[32]}'
                                                 # full graphs for every draft depth 3..7 × up to 64 seats
@@ -72,7 +78,8 @@ vllm:
   reasoning-parser: qwen3
   speculative-config: '{"method":"mtp","num_speculative_tokens":7,"rejection_sample_method":"block","draft_sample_method":"probabilistic"}'
                                                 # up to 7 sampled drafts, depth chosen live (mtp_depth below)
-  use-replayssm: true
+  # use-replayssm: true                           # local deviation: vLLM rejects it for Qwen4ExpForConditionalGeneration
+                                                 # ("is not supported for architecture" — only NemotronH sets supports_replayssm)
   async-scheduling: true
 
 # dynamic draft depth → cache/mbx-depth.json on both boxes (edit it to change it without a restart)
