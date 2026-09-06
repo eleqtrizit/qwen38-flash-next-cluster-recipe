@@ -58,35 +58,48 @@ for side in HEAD WORKER; do
   [ "$(pfield "$P" RDMA)" = yes ]     || echo "  ⚠ $side: no /dev/infiniband — NCCL will fall back to TCP (~2x slower steps). Install rdma-core + check the ConnectX link."
 done
 
-# 4. interconnect discovery. Management = the path ssh took (head iface that routes to WORKER_HOST; on the
-#    worker, the iface holding WORKER_HOST). Candidates = every OTHER interface. Try every head-candidate →
-#    worker-candidate pair with a bound ping; the pairs that answer are the interconnect links.
+# 4. interconnect discovery. Do NOT assume the ssh path is a "management LAN" — on some boxes (e.g. DGX Spark)
+#    ssh rides the ConnectX itself. So: try EVERY head → worker interface pair with a bound ping (the pairs that
+#    answer are the interconnect links), then PREFER a link where both ends carry an RDMA HCA over one that
+#    doesn't. Tie-break: more links found → still ask.
 echo "· discovering the interconnect…"
-HEAD_MGMT_IF="$(route_dev "$WORKER_HOST")"
-mapfile -t HC < <(echo "$PH" | awk -v m="$HEAD_MGMT_IF" '$1=="IFACE" && $2!=m {print $2, $3, $4}')
-mapfile -t WC < <(echo "$PW" | awk -v h="$WORKER_HOST" '$1=="IFACE" && $3!=h {print $2, $3, $4}')
-LINKS=()
+mapfile -t HC < <(echo "$PH" | awk '$1=="IFACE" {print $2, $3, $4}')
+mapfile -t WC < <(echo "$PW" | awk '$1=="IFACE" {print $2, $3, $4}')
+LINKS=(); RDMALINKS=()
 for h in "${HC[@]}"; do
   set -- $h; hif=$1; hip=$2; hhca=$3
   for w in "${WC[@]}"; do
     set -- $w; wif=$1; wip=$2; whca=$3
+    [ "$wip" != "$hip" ] || continue                       # skip pinging ourselves
     if ping -I "$hif" -c1 -W1 "$wip" >/dev/null 2>&1; then
-      LINKS+=("$hif $hip $hhca $wif $wip $whca")
-      echo "  link: head $hif ($hip$([ "$hhca" != - ] && echo ", RDMA $hhca")) ⇄ worker $wif ($wip$([ "$whca" != - ] && echo ", RDMA $whca"))"
+      L="$hif $hip $hhca $wif $wip $whca"
+      if [ "$hhca" != - ] && [ "$whca" != - ]; then
+        RDMALINKS+=("$L")
+        echo "  link (RDMA): head $hif ($hip, RDMA $hhca) ⇄ worker $wif ($wip, RDMA $whca)"
+      else
+        LINKS+=("$L")
+        echo "  link: head $hif ($hip$([ "$hhca" != - ] && echo ", RDMA $hhca")) ⇄ worker $wif ($wip$([ "$whca" != - ] && echo ", RDMA $whca"))"
+      fi
     fi
   done
 done
-if [ "${#LINKS[@]}" -eq 0 ]; then
+if [ "${#RDMALINKS[@]}" -eq 1 ] && [ "${#LINKS[@]}" -eq 0 ]; then
+  PICK="${RDMALINKS[0]}"                                 # exactly one RDMA link — take it, no questions
+elif [ "${#RDMALINKS[@]}" -eq 0 ] && [ "${#LINKS[@]}" -eq 1 ]; then
+  PICK="${LINKS[0]}"
+elif [ "${#RDMALINKS[@]}" -eq 0 ] && [ "${#LINKS[@]}" -eq 0 ]; then
+  HEAD_MGMT_IF="$(route_dev "$WORKER_HOST")"
   echo "  ⚠ no dedicated interconnect found — falling back to the management LAN (no RDMA; make sure it does not block ports)."
   HIP="$(echo "$PH" | awk -v m="$HEAD_MGMT_IF" '$1=="IFACE" && $2==m {print $3; exit}')"
   WIF="$(echo "$PW" | awk -v h="$WORKER_HOST" '$1=="IFACE" && $3==h {print $2; exit}')"
   PICK="$HEAD_MGMT_IF $HIP - $WIF $WORKER_HOST -"
-elif [ "${#LINKS[@]}" -eq 1 ]; then
-  PICK="${LINKS[0]}"
-else
-  echo "  several links — pick the one to use (a dedicated ConnectX link beats a shared switch):"
-  for i in "${!LINKS[@]}"; do echo "    [$((i+1))] ${LINKS[$i]}"; done
-  read -rp "  choice [1]: " sel; PICK="${LINKS[$(( ${sel:-1} - 1 ))]}"
+else                                                     # several candidates — ask, RDMA links listed first
+  ALL=()                                                 # RDMA links first in the menu
+  for L in "${RDMALINKS[@]}"; do ALL+=("$L"); done
+  [ "${#LINKS[@]}" -gt 0 ] && for L in "${LINKS[@]}"; do ALL+=("$L"); done
+  echo "  several links — pick the one to use (RDMA links are [1..n] first, they beat TCP):"
+  for i in "${!ALL[@]}"; do echo "    [$((i+1))] ${ALL[$i]}"; done
+  read -rp "  choice [1]: " sel; PICK="${ALL[$(( ${sel:-1} - 1 ))]}"
 fi
 set -- $PICK
 HEAD_IFACE=$1; HEAD_IC=$2; HEAD_HCA=$3; WORKER_IFACE=$4; WORKER_IC=$5; WORKER_HCA=$6
