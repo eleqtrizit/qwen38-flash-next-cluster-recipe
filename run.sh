@@ -75,7 +75,7 @@ FLAGS=(); while IFS=$'\t' read -r k v; do
 done < <(rsection vllm)
 compose() {  # compose <rank> <iface> <ic-ip> <hca> <has-rdma yes|no> <gid-index|"">  → prints the docker run command (quoted)
   local rank=$1 iface=$2 ic=$3 hca=$4 rdma=$5 gid=$6 a=()
-  a=(docker run -d --name "$NAME" --gpus all --ipc=host --network host --cap-add SYS_PTRACE)
+  a=(docker run -d --restart unless-stopped --name "$NAME" --gpus all --ipc=host --network host --cap-add SYS_PTRACE)
   [ "$rdma" = yes ] && a+=(--device /dev/infiniband --cap-add IPC_LOCK --ulimit memlock=-1:-1)
   [ -n "$CPUSET" ] && a+=(--cpuset-cpus "$CPUSET")
   a+=(-v "$MODELS_ABS:/models" -v "$CACHE_ABS:/cache"
