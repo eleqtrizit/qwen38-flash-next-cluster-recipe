@@ -73,6 +73,50 @@ ENVS=(); while IFS=$'\t' read -r k v; do [ -n "$k" ] && ENVS+=(-e "$k=$v"); done
 FLAGS=(); while IFS=$'\t' read -r k v; do
   case "$v" in true) FLAGS+=("--$k");; false|null|"") ;; *) FLAGS+=("--$k" "$v");; esac
 done < <(rsection vllm)
+
+# 4a. INT4-AutoRound checkpoint (its fp8 n-gram table in ple-table/, its own MTP draft head): fp8 side layers + draft scale 2, the
+#     table converted fp8 → NVFP4 at load (resident, half per box), its draft head (cache/draft-k10: links + small JSON, top-k 10,
+#     the head's shared-expert width) on BOTH boxes, expert parallel (int4 group-128 experts cannot be TP-split for Marlin), no
+#     global MoE backend (the draft head's bf16 experts refuse it)
+if [ -d "$MODEL_DIR/ple-table" ]; then
+  ENVS+=(-e VLLM_FP8_HYBRID=1 -e MBX_MTP_DRAFT_SCALE=2 -e "MBX_PLE_FP8_DIR=/models/$LOCAL_NAME/ple-table" -e MBX_PLE_FP8_TO_NVFP4=1)
+  python3 - "$MODEL_DIR" "/models/$LOCAL_NAME" "$CACHE_ABS/draft-k10" <<'PY' || { echo "✗ could not build the draft folder"; exit 1; }
+import json, os, shutil, struct, sys
+snap, csnap, out = sys.argv[1:4]
+wm = json.load(open(os.path.join(snap, "model.safetensors.index.json")))["weight_map"]
+keep = {k: v for k, v in wm.items() if k.startswith(("mtp.", "lm_head.")) or k.endswith("embed_tokens.weight")}
+if os.path.lexists(out):
+    shutil.rmtree(out)
+os.makedirs(out)
+for f in sorted(os.listdir(snap)):
+    if f in ("config.json", "model.safetensors.index.json", "ple-table", "fast-fp8", ".cache") or \
+       (f.endswith(".safetensors") and f not in set(keep.values())):
+        continue
+    os.symlink(os.path.join(csnap, f), os.path.join(out, f))
+json.dump({"metadata": {}, "weight_map": keep}, open(os.path.join(out, "model.safetensors.index.json"), "w"))
+cfg = json.load(open(os.path.join(snap, "config.json"))); t = cfg.get("text_config", cfg)
+t["num_experts_per_tok"] = 10
+with open(os.path.join(snap, "model_extra_tensors.safetensors"), "rb") as fh:
+    h = json.loads(fh.read(struct.unpack("<Q", fh.read(8))[0]))
+w = {v["shape"][0] for k, v in h.items() if k.endswith("mlp.shared_expert.gate_proj.weight")}
+if len(w) == 1:
+    t["shared_expert_intermediate_size"] = w.pop()
+json.dump(cfg, open(os.path.join(out, "config.json"), "w"), indent=2)
+PY
+  ssh_w "rm -rf '$CACHE_ABS/draft-k10'"
+  tar -C "$CACHE_ABS" -cf - draft-k10 | ssh_w "tar -C '$CACHE_ABS' -xf -"
+  F2=(); i=0
+  while [ $i -lt ${#FLAGS[@]} ]; do
+    f="${FLAGS[$i]}"
+    case "$f" in
+      --moe-backend) i=$((i + 2)); continue;;
+      --speculative-config) F2+=("$f" "${FLAGS[$((i + 1))]/\{\"method\":\"mtp\",/{\"method\":\"mtp\",\"model\":\"/cache/draft-k10\",}"); i=$((i + 2)); continue;;
+    esac
+    F2+=("$f"); i=$((i + 1))
+  done
+  FLAGS=("${F2[@]}" --enable-expert-parallel)
+  echo "· INT4-AutoRound: fp8 side layers, n-gram table fp8 → NVFP4 at load, its draft head (cache/draft-k10), expert parallel"
+fi
 compose() {  # compose <rank> <iface> <ic-ip> <hca> <has-rdma yes|no> <gid-index|"">  → prints the docker run command (quoted)
   local rank=$1 iface=$2 ic=$3 hca=$4 rdma=$5 gid=$6 a=()
   a=(docker run -d --name "$NAME" --gpus all --ipc=host --network host --cap-add SYS_PTRACE)
@@ -94,6 +138,16 @@ compose() {  # compose <rank> <iface> <ic-ip> <hca> <has-rdma yes|no> <gid-index
 HEAD_RDMA=$([ -d /dev/infiniband ] && echo yes || echo no)
 WORKER_RDMA=$(ssh_w "[ -d /dev/infiniband ] && echo yes || echo no")
 [ "$HEAD_RDMA$WORKER_RDMA" = yesyes ] || echo "  ⚠ RDMA not available on both boxes (head $HEAD_RDMA, worker $WORKER_RDMA) — running NCCL over TCP"
+# ib_links: 2 → add the second PCIe half of the ConnectX-7 (an ACTIVE RDMA device other than the first, whose interface has an
+# IPv4 — RoCE v2 needs one). Missing on either box → both stay on one device (a one-sided list hangs NCCL init).
+SIB_PROBE='for d in /sys/class/infiniband/*; do n=${d##*/}; [ "$n" = "$1" ] && continue
+  grep -q ACTIVE "$d/ports/1/state" 2>/dev/null || continue
+  for nd in "$d"/device/net/*; do ip -4 -o addr show dev "${nd##*/}" 2>/dev/null | grep -q inet && { echo "$n"; exit 0; }; done; done'
+if [ "$(rkey server ib_links)" = 2 ] && [ "$HEAD_RDMA$WORKER_RDMA" = yesyes ] && [ -n "$HEAD_HCA" ] && [ -n "$WORKER_HCA" ]; then
+  HS="$(bash -c "$SIB_PROBE" _ "$HEAD_HCA")"; WS="$(ssh_w "bash -c $(printf '%q' "$SIB_PROBE") _ $(printf '%q' "$WORKER_HCA")")"
+  if [ -n "$HS" ] && [ -n "$WS" ]; then HEAD_HCA="$HEAD_HCA,$HS"; WORKER_HCA="$WORKER_HCA,$WS"; echo "· dual rail: head $HEAD_HCA · worker $WORKER_HCA"
+  else echo "  ⚠ ib_links: 2 but no second active RDMA device with an IPv4 (head '${HS:-none}', worker '${WS:-none}') — staying on one"; fi
+fi
 # NCCL_IB_GID_INDEX per box from the live GID table (it moves on a link flap / reboot); recipe.yaml's value is the fallback
 PIN_GID="$(rkey env NCCL_IB_GID_INDEX)"; HEAD_GID=""; WORKER_GID=""
 [ "$HEAD_RDMA" = yes ] && [ -n "$HEAD_HCA" ] && HEAD_GID="$(gid_index "$HEAD_HCA" "$HEAD_IFACE")"
@@ -138,6 +192,19 @@ fi
 #    every successful TP=2 boot of this model used; the worker retries the connect until the head listens.
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 ssh_w "docker rm -f '$NAME' >/dev/null 2>&1 || true"
+# FlashInfer's autotune cache is written by one rank only; a box holding a cache its peer lacks deadlocks the warm-up → clear both
+for side in head worker; do
+  c="docker run --rm --entrypoint rm -v '$CACHE_ABS:/c' '$IMAGE' -rf /c/vllm-cache/flashinfer_autotune_cache"
+  if [ $side = head ]; then sh -c "$c"; else ssh_w "$c"; fi
+done
+# dynamic draft depth (recipe.yaml mtp_depth; absent or mode: off = fixed K) → cache/mbx-depth.json on BOTH boxes (ranks must agree)
+lst() { printf '%s' "$1" | tr -d '[] '; }
+MD_MODE="$(rkey mtp_depth mode)"; MD_MIN="$(rkey mtp_depth min)"; MD_WIN="$(rkey mtp_depth window)"
+MD_UP="$(lst "$(rkey mtp_depth promote)")"; MD_DN="$(lst "$(rkey mtp_depth demote)")"; MD_LOG="$(rkey mtp_depth log)"
+MDJ="$(printf '{"mode": "%s", "min": %s, "window": %s, "promote": [%s], "demote": [%s], "log": %s}' \
+  "${MD_MODE:-off}" "${MD_MIN:-3}" "${MD_WIN:-48}" "${MD_UP:-60,45}" "${MD_DN:-25,15}" "${MD_LOG:-false}")"
+printf '%s\n' "$MDJ" > "$CACHE_ABS/mbx-depth.json"; printf '%s\n' "$MDJ" | ssh_w "cat > '$CACHE_ABS/mbx-depth.json'"
+[ "${MD_MODE:-off}" = dynamic ] && echo "· draft depth: dynamic (min ${MD_MIN:-3}) — cache/mbx-depth.json, same on both boxes"
 wait_mem 100 120 || exit 1
 evict_cache "$MODEL_DIR"
 echo "· starting head (rank 0) — API on $HOST:$PORT once healthy (about 4 min with the weights present)"
