@@ -46,8 +46,6 @@ v4.1 stays available: `git checkout v4.1`. The version now matches the solo kit'
 | | v5.2 |
 |---|---|
 | thinking-on request (pasture), c=1 | **93.2** tok/s average · **176.8** peak |
-| structured output (JSON schema), c=1 | **124.4** |
-| long prose (7,000-word story), c=1 | **74.0** |
 | peak at c=1 / 2 / 4 / 8 / 16 / 32 / 64 | **177 / 252 / 357 / 506 / 684 / 885 / 1,174** |
 | average at c=1 / 2 / 4 / 8 / 16 / 32 / 64 (thinking off, mixed) | 100 / 155 / 244 / 335 / 484 / 718 / 968 |
 | prefill, 128k-token prompt | **3,939** tok/s |
