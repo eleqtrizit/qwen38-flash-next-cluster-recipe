@@ -10,7 +10,7 @@ NVFP4; the uncensored one is gated, no guardrails): richer, more creative answer
 `recipe.yaml` comment the active `model:` line and uncomment another, then `./run.sh` — the kit applies each checkpoint's
 settings itself. Details in [Which checkpoint](#which-checkpoint).
 
-Two boxes, one model, RDMA. **v5.2: 87 tok/s average and 168 peak on a thinking-on request, 1,008 tok/s at 64 streams, 3,939
+Two boxes, one model, RDMA. **v5.2: 93 tok/s average and 177 peak on a thinking-on request, 1,008 tok/s at 64 streams, 3,939
 tok/s prefill at 128k, 0.36 s to the first token.** Three commands.
 
 **Side by side with every other stack:** [myllmbox.com](https://myllmbox.com)
@@ -45,20 +45,21 @@ v4.1 stays available: `git checkout v4.1`. The version now matches the solo kit'
 
 | | v5.2 |
 |---|---|
-| thinking-on request (pasture), c=1 | **87.3** tok/s average · **168.3** peak |
+| thinking-on request (pasture), c=1 | **93.2** tok/s average · **176.8** peak |
 | structured output (JSON schema), c=1 | **124.4** |
 | long prose (7,000-word story), c=1 | **74.0** |
-| peak at c=1 / 2 / 4 / 8 / 16 / 32 / 64 (thinking off, mixed) | **135 / 222 / 319 / 492 / 664 / 885 / 1,122** |
+| peak at c=1 / 2 / 4 / 8 / 16 / 32 / 64 | **177 / 252 / 357 / 506 / 684 / 885 / 1,174** |
 | average at c=1 / 2 / 4 / 8 / 16 / 32 / 64 (thinking off, mixed) | 100 / 155 / 244 / 335 / 484 / 718 / 968 |
 | prefill, 128k-token prompt | **3,939** tok/s |
 | first token, 1k prompt | **0.36** s |
 | KV pool | **1,829,182** tokens |
 
 **Per prompt** (thinking off, aggregate tok/s of all streams, averages of 3 runs; c=1 = one full answer, c≥2 = 300 s with every
-stream kept busy)
+stream kept busy; **peak** = the best 10-s window measured at that concurrency)
 
 | prompt | c=1 | c=2 | c=4 | c=6 | c=8 | c=12 | c=16 | c=24 | c=32 | c=48 | c=64 |
 |---|---|---|---|---|---|---|---|---|---|---|---|
+| **peak** | **176.8** | **252.1** | **357.0** | **430.6** | **506.1** | **600.8** | **684.3** | **791.9** | **885.3** | **1,021.4** | **1,174.0** |
 | mixed (code + explanation) | 100.4 | 155.3 | 244.2 | 289.2 | 335.2 | 413.2 | 483.9 | 603.5 | 718.0 | 881.1 | 968.4 |
 | structured output (JSON schema) | 124.4 | 208.8 | 311.9 | 377.5 | 442.6 | 538.8 | 614.5 | 703.6 | 783.3 | 915.8 | 977.1 |
 | long prose (7,000-word story) | 74.0 | 122.1 | 195.2 | 242.0 | 288.0 | 352.5 | 413.0 | 490.3 | 555.0 | 638.2 | 699.5 |
@@ -176,7 +177,7 @@ Switching is swapping the `model:` line and the `kv-cache-memory` line under `vl
 
 | `model:` | what it is | on this kit |
 |---|---|---|
-| `azampatti/Qwen3.8-Flash-Next-125B-A5B-INT4-AutoRound` (default) | 5 of 512 experts per token, AutoRound int4 experts, fp8 side layers and n-gram table — every v5.2 number above | the fastest: 1,008 tok/s at 64 streams, 168 tok/s peak |
+| `azampatti/Qwen3.8-Flash-Next-125B-A5B-INT4-AutoRound` (default) | 5 of 512 experts per token, AutoRound int4 experts, fp8 side layers and n-gram table — every v5.2 number above | the fastest: 1,008 tok/s at 64 streams, 177 tok/s peak |
 | `myllmbox/Qwen3.8-Flash-Next-hibrid48` | the full 10-expert body, calibrated, NVFP4 output head | ~10 % slower (below), richer and more creative answers |
 | `myllmbox/Qwen3.8-Flash-Next-hibrid48-uncensored` | OrcaRouter's abliterated (refusal-removed) body with the same head — **no guardrails**; research, red-teaming, private use behind your own moderation | same speed as hibrid48; quality table above |
 
