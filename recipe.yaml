@@ -78,8 +78,7 @@ vllm:
   reasoning-parser: qwen3
   speculative-config: '{"method":"mtp","num_speculative_tokens":7,"rejection_sample_method":"block","draft_sample_method":"probabilistic"}'
                                                 # up to 7 sampled drafts, depth chosen live (mtp_depth below)
-  # use-replayssm: true                           # local deviation: vLLM rejects it for Qwen4ExpForConditionalGeneration
-                                                 # ("is not supported for architecture" — only NemotronH sets supports_replayssm)
+  use-replayssm: true
   async-scheduling: true
 
 # dynamic draft depth → cache/mbx-depth.json on both boxes (edit it to change it without a restart)
